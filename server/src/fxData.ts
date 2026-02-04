@@ -1,5 +1,5 @@
 // src/fxData.ts
-// Fake FX data for local testing only
+// this is some testing data
 
 export type FxPairKey =
   | "GBPUSD"
@@ -9,8 +9,8 @@ export type FxPairKey =
   | "USDCAD";
 
 type FxPairData = {
-  spot: number;      // Home CCY per 1 Exposure CCY
-  closes: number[];  // Monthly closes (~10y, fake but stable)
+  spot: number;      // this is the home CCY per 1 exposure CCY
+  closes: number[];  // this is the monthly closes 
 };
 
 export const FX_DATA: Record<FxPairKey, FxPairData> = {

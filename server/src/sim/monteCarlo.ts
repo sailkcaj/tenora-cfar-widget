@@ -6,7 +6,6 @@ export type SimulationResult = {
   cfar: number;
   sims: number;
   months: number;
-
   hist: {
     bins: number;
     min: number;
@@ -18,9 +17,13 @@ export type SimulationResult = {
 export type HedgedSimulationResult = {
   unhedged: SimulationResult;
   hedged: SimulationResult;
-  hedgeRatio: number;       // 0..1
-  forwardRate: number;      // all-in forward rate
-  riskReductionPct: number; // 0..100
+  hedgeRatio: number;
+  forwardRate: number;
+  riskReductionPct: number;
+};
+
+export type FXPathSet = {
+  spots: number[][]; // spots[sim][t], t = 0..months
 };
 
 function mean(arr: number[]): number {
@@ -87,7 +90,7 @@ export function simulateCFaR(params: {
     clampUpper,
   } = params;
 
-  const outcomes: number[] = new Array(sims);
+  const outcomes = new Array<number>(sims);
 
   for (let k = 0; k < sims; k++) {
     let rate = spot;
@@ -95,7 +98,7 @@ export function simulateCFaR(params: {
 
     for (let t = 0; t < months; t++) {
       const r = monthlyReturns[randomIndex(monthlyReturns.length)];
-      rate = rate * (1 + r);
+      rate *= 1 + r;
 
       if (clampLower !== undefined && rate < clampLower) rate = clampLower;
       if (clampUpper !== undefined && rate > clampUpper) rate = clampUpper;
@@ -120,60 +123,105 @@ export function simulateCFaR(params: {
   };
 }
 
-/**
- * Hedged simulation:
- * - hedgeRatio of each month's exposure is converted at a fixed forwardRate
- * - the remaining (1-hedgeRatio) is converted at the simulated spot path rate
- */
-export function simulateHedgedCFaR(params: {
+export function simulateFXPaths(params: {
   spot: number;
   monthlyReturns: number[];
-  exposures: number[];
   sims?: number;
   months?: number;
   clampLower?: number;
   clampUpper?: number;
-
-  hedgeRatio: number; // 0..1
-  forwardRate: number; // all-in forward
-}): HedgedSimulationResult {
+}): FXPathSet {
   const {
     spot,
     monthlyReturns,
-    exposures,
     sims = 5000,
     months = 12,
     clampLower,
     clampUpper,
-    hedgeRatio,
-    forwardRate,
   } = params;
 
-  const unhedgedOutcomes: number[] = new Array(sims);
-  const hedgedOutcomes: number[] = new Array(sims);
+  const spots: number[][] = new Array(sims);
 
   for (let k = 0; k < sims; k++) {
+    const path = new Array<number>(months + 1);
     let rate = spot;
-    let totalUnhedged = 0;
-    let totalHedged = 0;
+    path[0] = rate;
 
-    for (let t = 0; t < months; t++) {
+    for (let t = 1; t <= months; t++) {
       const r = monthlyReturns[randomIndex(monthlyReturns.length)];
-      rate = rate * (1 + r);
+      rate *= 1 + r;
 
       if (clampLower !== undefined && rate < clampLower) rate = clampLower;
       if (clampUpper !== undefined && rate > clampUpper) rate = clampUpper;
 
+      path[t] = rate;
+    }
+
+    spots[k] = path;
+  }
+
+  return { spots };
+}
+
+export function applyHedgingToPaths(params: {
+  fxPaths: FXPathSet;
+  exposures: number[];
+  hedgeRatio: number;
+  forwardRate: number;
+  hedgeTenorMonths?: number;
+}): HedgedSimulationResult {
+  const {
+    fxPaths,
+    exposures,
+    hedgeRatio,
+    forwardRate,
+    hedgeTenorMonths = exposures.length,
+  } = params;
+
+  const sims = fxPaths.spots.length;
+  const months = exposures.length;
+  const forwardFactor = forwardRate / fxPaths.spots[0][0];
+
+  const unhedgedOutcomes = new Array<number>(sims);
+  const hedgedOutcomes = new Array<number>(sims);
+
+  type Hedge = {
+    settleMonth: number;
+    forwardRate: number;
+    notional: number;
+  };
+
+  for (let k = 0; k < sims; k++) {
+    const path = fxPaths.spots[k];
+    let totalUnhedged = 0;
+    let totalHedged = 0;
+    let hedgeBook: Hedge[] = [];
+
+    for (let t = 0; t < months; t++) {
       const exp = exposures[t];
+      const entrySpot = path[t];
+      const settleSpot = path[t + 1];
 
-      // Unhedged: 100% floats
-      totalUnhedged += exp * rate;
+      const hedgeTargetMonth = t + hedgeTenorMonths;
+      if (hedgeTargetMonth < exposures.length) {
+        hedgeBook.push({
+          settleMonth: hedgeTargetMonth,
+          forwardRate: entrySpot * forwardFactor,
+          notional: exposures[hedgeTargetMonth] * hedgeRatio,
+        });
+      }
 
-      // Hedged: split exposure
-      const hedgedPart = exp * hedgeRatio;
-      const unhedgedPart = exp * (1 - hedgeRatio);
+      let hedgedCashflow = 0;
+      hedgeBook = hedgeBook.filter(h => {
+        if (h.settleMonth === t) {
+          hedgedCashflow += h.notional * h.forwardRate;
+          return false;
+        }
+        return true;
+      });
 
-      totalHedged += hedgedPart * forwardRate + unhedgedPart * rate;
+      totalHedged += hedgedCashflow + exp * (1 - hedgeRatio) * settleSpot;
+      totalUnhedged += exp * settleSpot;
     }
 
     unhedgedOutcomes[k] = totalUnhedged;
@@ -197,14 +245,35 @@ export function simulateHedgedCFaR(params: {
   const unhedged = summarize(unhedgedOutcomes);
   const hedged = summarize(hedgedOutcomes);
 
-  const riskReductionPct =
-    unhedged.cfar > 0 ? (1 - hedged.cfar / unhedged.cfar) * 100 : 0;
-
   return {
     unhedged,
     hedged,
     hedgeRatio,
     forwardRate,
-    riskReductionPct,
+    riskReductionPct:
+      unhedged.cfar > 0 ? (1 - hedged.cfar / unhedged.cfar) * 100 : 0,
   };
+}
+
+export function simulateHedgedCFaR(params: {
+  spot: number;
+  monthlyReturns: number[];
+  exposures: number[];
+  sims?: number;
+  months?: number;
+  clampLower?: number;
+  clampUpper?: number;
+  hedgeRatio: number;
+  forwardRate: number;
+  hedgeTenorMonths?: number;
+}): HedgedSimulationResult {
+  const fxPaths = simulateFXPaths(params);
+
+  return applyHedgingToPaths({
+    fxPaths,
+    exposures: params.exposures,
+    hedgeRatio: params.hedgeRatio,
+    forwardRate: params.forwardRate,
+    hedgeTenorMonths: params.hedgeTenorMonths,
+  });
 }
