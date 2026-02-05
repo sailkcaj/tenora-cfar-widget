@@ -103,7 +103,7 @@ export function simulateCFaR(params: {
       if (clampLower !== undefined && rate < clampLower) rate = clampLower;
       if (clampUpper !== undefined && rate > clampUpper) rate = clampUpper;
 
-      total += exposures[t] * rate;
+      total += exposures[t] / rate;
     }
 
     outcomes[k] = total;
@@ -168,60 +168,33 @@ export function applyHedgingToPaths(params: {
   exposures: number[];
   hedgeRatio: number;
   forwardRate: number;
-  hedgeTenorMonths?: number;
+  hedgeTenorMonths?: number; // kept for compatibility, not used
 }): HedgedSimulationResult {
-  const {
-    fxPaths,
-    exposures,
-    hedgeRatio,
-    forwardRate,
-    hedgeTenorMonths = exposures.length,
-  } = params;
+  const { fxPaths, exposures, hedgeRatio, forwardRate } = params;
 
   const sims = fxPaths.spots.length;
   const months = exposures.length;
-  const forwardFactor = forwardRate / fxPaths.spots[0][0];
 
   const unhedgedOutcomes = new Array<number>(sims);
   const hedgedOutcomes = new Array<number>(sims);
-
-  type Hedge = {
-    settleMonth: number;
-    forwardRate: number;
-    notional: number;
-  };
 
   for (let k = 0; k < sims; k++) {
     const path = fxPaths.spots[k];
     let totalUnhedged = 0;
     let totalHedged = 0;
-    let hedgeBook: Hedge[] = [];
 
     for (let t = 0; t < months; t++) {
       const exp = exposures[t];
-      const entrySpot = path[t];
       const settleSpot = path[t + 1];
 
-      const hedgeTargetMonth = t + hedgeTenorMonths;
-      if (hedgeTargetMonth < exposures.length) {
-        hedgeBook.push({
-          settleMonth: hedgeTargetMonth,
-          forwardRate: entrySpot * forwardFactor,
-          notional: exposures[hedgeTargetMonth] * hedgeRatio,
-        });
-      }
+      // Unhedged: full exposure converted at simulated spot
+      totalUnhedged += exp / settleSpot;
 
-      let hedgedCashflow = 0;
-      hedgeBook = hedgeBook.filter(h => {
-        if (h.settleMonth === t) {
-          hedgedCashflow += h.notional * h.forwardRate;
-          return false;
-        }
-        return true;
-      });
+      // Hedged: locked portion at forward + floating remainder at simulated spot
+      const locked = (exp * hedgeRatio) / forwardRate;
+      const floating = (exp * (1 - hedgeRatio)) / settleSpot;
 
-      totalHedged += hedgedCashflow + exp * (1 - hedgeRatio) * settleSpot;
-      totalUnhedged += exp * settleSpot;
+      totalHedged += locked + floating;
     }
 
     unhedgedOutcomes[k] = totalUnhedged;

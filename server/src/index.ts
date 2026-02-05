@@ -136,7 +136,6 @@ app.post("/api/cfar/run", (req, res) => {
 
     // here if no forward rate we cannot compute hedged
     if (fwd === null) {
-      // Returns only the unhedged results hedged is null
       return res.json({
         pair: pairKey,
         spot: pair.spot,
@@ -145,19 +144,23 @@ app.post("/api/cfar/run", (req, res) => {
         forwardRate: null,
         hedgeRatio: hr,
 
-        // keep existing fields as unhedged
+    // keep existing fields as unhedged
         mean: unhedged.mean,
         p5: unhedged.p5,
         cfar: unhedged.cfar,
         hist: unhedged.hist,
 
+    // no hedging blocks available without a forward rate
+        unhedged: unhedged,
+        fullyHedged: null,
+        selected: null,
+
         hedged: null,
       });
     }
 
-    // computes hedged pack
+    // Selected hedge ratio (slider %)
     const pack = simulateHedgedCFaR({
-      // Runs a hedged version using forwardRate + hedgeRatio
       spot: pair.spot,
       monthlyReturns,
       exposures,
@@ -168,6 +171,19 @@ app.post("/api/cfar/run", (req, res) => {
       hedgeRatio: hr,
       forwardRate: fwd,
     });
+
+// 100% hedged
+    const pack100 = simulateHedgedCFaR({
+      spot: pair.spot,
+      monthlyReturns,
+      exposures,
+      months: horizon,
+      sims: simsNum,
+      clampLower: minHist * 0.85,
+      clampUpper: maxHist * 1.15,
+      hedgeRatio: 1,
+      forwardRate: fwd,
+    }); 
 
     return res.json({
       // Returns response payload used by the UI and callers
@@ -183,6 +199,10 @@ app.post("/api/cfar/run", (req, res) => {
       p5: pack.unhedged.p5,
       cfar: pack.unhedged.cfar,
       hist: pack.unhedged.hist,
+
+      unhedged: pack.unhedged,
+      fullyHedged: pack100.hedged,
+      selected: pack.hedged,
 
       // hedged block
       hedged: {
@@ -282,7 +302,9 @@ app.get("/", (_req, res) => {
 
 <!-- results: Hedged -->
 <div id="hedgedBox" style="margin-top:14px; padding:12px; background:#f6f6f6; border-radius:8px;">
-  <div style="font-size:14px; font-weight:600; margin-bottom:8px;">Results (Hedged)</div>
+  <div style="font-size:14px; font-weight:600; margin-bottom:8px;">
+    Results (Selected hedge ratio)
+  </div>
 
   <div style="display:grid; grid-template-columns: 260px 1fr; row-gap:6px; column-gap:12px; font-size:13px;">
     <div>Hedged expected outcome (mean)</div><div><b id="hMeanMoney">-</b></div>
@@ -291,6 +313,24 @@ app.get("/", (_req, res) => {
     <div>Risk reduction</div><div><b id="riskRed">-</b></div>
   </div>
 
+<!-- results: Fully Hedged -->
+<div id="fullyHedgedBox" style="margin-top:14px; padding:12px; background:#f6f6f6; border-radius:8px;">
+  <div style="font-size:14px; font-weight:600; margin-bottom:8px;">
+    Results (100% hedged)
+  </div>
+
+  <div style="display:grid; grid-template-columns: 260px 1fr; row-gap:6px; column-gap:12px; font-size:13px;">
+    <div>Fully hedged expected outcome (mean)</div><div><b id="fhMeanMoney">-</b></div>
+    <div>Fully hedged worst 5% outcome (p5)</div><div><b id="fhP5Money">-</b></div>
+    <div>Fully hedged CFaR (mean − p5)</div><div><b id="fhCfarMoney">-</b></div>
+  </div>
+
+  <div style="font-size:12px;opacity:.7;margin-top:8px;">
+    This is the “locked” forward outcome at 100% hedge.
+  </div>
+</div>
+
+  
   <div style="font-size:12px;opacity:.7;margin-top:8px;">
     Enter a forward rate to compute hedged results.
   </div>
@@ -407,6 +447,11 @@ const hCfarMoney = document.getElementById("hCfarMoney");
 
 const riskRed    = document.getElementById("riskRed");
 // Risk reduction % display
+
+// results fully hedged
+const fhMeanMoney = document.getElementById("fhMeanMoney");
+const fhP5Money   = document.getElementById("fhP5Money");
+const fhCfarMoney = document.getElementById("fhCfarMoney");
 
 // histogram toggle
 const histUn = document.getElementById("histUn");
@@ -603,22 +648,41 @@ async function run(){
     fwdOut.textContent = String(j.forwardRate);
   }
 
-  // hedged
-  if (j.hedged) {
-    // If backend returned hedged results, display them
-    hMeanMoney.textContent = fmtMoney(j.hedged.mean, homeSel.value);
-    hP5Money.textContent = fmtMoney(j.hedged.p5, homeSel.value);
-    hCfarMoney.textContent = fmtMoney(j.hedged.cfar, homeSel.value);
-    riskRed.textContent = (Number.isFinite(j.hedged.riskReductionPct))
-      ? j.hedged.riskReductionPct.toFixed(1) + "%"
-      : "-";
-  } else {
-    // otherwise clear hedged results
-    hMeanMoney.textContent = "-";
-    hP5Money.textContent = "-";
-    hCfarMoney.textContent = "-";
-    riskRed.textContent = "-";
+  // =====================
+  // Selected hedge ratio
+  // =====================
+  hMeanMoney.textContent = "-";
+  hP5Money.textContent   = "-";
+  hCfarMoney.textContent = "-";
+  riskRed.textContent    = "-";
+
+  if (j && j.selected) {
+    hMeanMoney.textContent = fmtMoney(j.selected.mean, homeSel.value);
+    hP5Money.textContent   = fmtMoney(j.selected.p5, homeSel.value);
+    hCfarMoney.textContent = fmtMoney(j.selected.cfar, homeSel.value);
+
+    if (j.hedged && Number.isFinite(j.hedged.riskReductionPct)) {
+      riskRed.textContent = j.hedged.riskReductionPct.toFixed(1) + "%";
+    }
   }
+
+  // =====================
+  // Fully hedged (100%)
+  // =====================
+  if (fhMeanMoney) {
+    fhMeanMoney.textContent = "-";
+    fhP5Money.textContent   = "-";
+    fhCfarMoney.textContent = "-";
+
+    if (j && j.fullyHedged) {
+      fhMeanMoney.textContent = fmtMoney(j.fullyHedged.mean, homeSel.value);
+      fhP5Money.textContent   = fmtMoney(j.fullyHedged.p5, homeSel.value);
+      fhCfarMoney.textContent = fmtMoney(j.fullyHedged.cfar, homeSel.value);
+    }
+  }
+
+
+
 
   // histogram: based on radio selection
   renderSelectedHist();
